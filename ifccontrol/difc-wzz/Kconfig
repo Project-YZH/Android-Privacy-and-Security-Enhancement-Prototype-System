@@ -1,0 +1,19 @@
+config SECURITY_DIFC_WZZ
+	bool "DIFC support"
+	depends on SECURITY
+	select SECURITYFS
+	select SECURITY_PATH
+	default y
+	help
+	  
+	  Further information can be found in Documentation/security/difc_wzz.txt.
+
+	  If you are unsure how to answer this question, answer N.
+
+config SECURITY_DIFC_WZZ_STACKED
+	bool "difc stacked with other LSMs"
+	depends on SECURITY_DIFC_WZZ
+	default y
+	help
+	  When difc is built into the kernel, force it to stack with the
+	  selected primary LSM.

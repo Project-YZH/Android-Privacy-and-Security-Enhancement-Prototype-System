@@ -1,0 +1,33 @@
+channel i,j
+
+datatype value=taint|untaint
+datatype apis=source.value |sink.value |normalx.value|normaly.value.value
+datatype funlist=funw|funv|funz
+datatype calldeals=call|enter|return|callback
+datatype transfers=funw_in.value|funw_out.value|funv_in.value.value|funv_out.value
+
+channel api:apis
+channel transfer:transfers
+channel calldeal:calldeals.funlist
+MAIN0(a,b)=api.source.taint->MAIN1(taint,b)
+MAIN1(a,b)=calldeal.call.funw->transfer.funw_in!a->transfer.funw_out?returnvalue->calldeal.callback.funw->MAIN2(a,returnvalue)
+MAIN2(a,b)=api.sink!b->STOP
+
+FUNW0(x,y)=calldeal.enter.funw->transfer.funw_in?invalue->FUNW1(invalue,y)
+FUNW1(x,y)= FUNW2(x, x)
+FUNW2(x,y)=api.normalx!y-> FUNW3(x,y)
+FUNW3(x,y)=transfer.funw_out!y->calldeal.return.funw->FUNW0(untaint,untaint)
+
+SYNM=calldeal.call.funw->calldeal.enter.funw->calldeal.return.funw->calldeal.callback.funw->SYNM
+
+PROCESS=MAIN0(untaint,untaint) ||| FUNW0(untaint,untaint)
+
+SAMPLE=PROCESS [|{|calldeal|}|] SYNM
+
+uselessevents={|transfer,calldeal,api.normalx|}
+SAFE_SAMPLE=SAMPLE\uselessevents
+
+PROPERTY=api.source.taint->api.sink.taint->STOP
+
+assert SAMPLE [T= PROPERTY
+assert SAFE_SAMPLE[T= PROPERTY

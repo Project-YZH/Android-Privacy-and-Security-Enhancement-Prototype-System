@@ -1,0 +1,313 @@
+--aaa
+MAX=2
+MAXOBJECT=1
+TO={1..MAX}
+FROM={1..MAX}
+DEST={1..MAX}
+PROCESS={1..MAX}
+WHO={1..MAX}
+WHICH={1..MAXOBJECT}
+
+----标记定义----------
+datatype DS=d
+
+----状态定义-----------
+S=Set(DS)
+C_ADD=Set(DS)
+C_SUB=Set(DS)
+
+----互斥锁---
+channel  enterS:{1..MAX}
+channel leaveS:{1..MAX}
+channel enterO:{1..MAXOBJECT}
+channel leaveO:{1..MAXOBJECT}
+datatype SORTTYPE=sin.{1..MAX}.{1..MAX}|sout.{1..MAX}.{1..MAX}
+channel sort:SORTTYPE
+channel enterlsmid,leavelsmid
+---随机数
+channel nonceID:{1..MAX}
+
+-----------------访问RM信道定义---------
+datatype SCS=t.S.C_SUB
+datatype SCAS=tag.S.C_ADD.C_SUB
+datatype POLICY=accept | reject
+
+datatype COMMAND=born|exec.WHICH|exit|create.WHICH.S|delete.WHICH|send.TO|recv.FROM|write.WHICH|read.WHICH|
+		   changeselflabel.S|changeobjectlabel.WHICH.S|apilabel.S|apireturn.POLICY.S  
+channel input,api:PROCESS.SCS.COMMAND
+
+-----------------访问secserver信道定义-----
+EXIST={0..1}
+datatype OPERATE=in.S|out|test.{0..1}.S
+channel buff:{1..MAX}.{1..MAX}.OPERATE
+
+channel NonceQ:{1..8}
+datatype CONFIG=req.S|res.C_ADD.C_SUB
+channel randc:CONFIG
+
+datatype ACCESS_SECSVR=iexec.WHICH|irecv.FROM.{0..1}.S|iexit|icreate.WHICH.S|idelete.WHICH|isend|iwrite.WHICH|iread.WHICH
+			|ichangeselflabel.S|ichangeobjectlabel.WHICH.S|ireturn.POLICY.S|jexec.POLICY.S.WHO.SCS
+
+channel access_secsvr:WHO.ACCESS_SECSVR
+-----------------访问LSM信道定义-----
+datatype ACCESS_LSM=getsubject.WHO.SCAS.EXIST|getobject.WHICH.SCAS.EXIST|
+		      setsubject.WHO.SCAS.EXIST|setobject.WHICH.SCAS.EXIST|getpid|chooseid.{0..1}.WHO|deleteid.WHO
+channel access_lsm:ACCESS_LSM
+
+------------------------------应用态-用户进程定义------------------------------------------------------------
+--用户的系统调用---
+EXEC(id,s,sub)=input.id.t.s.sub.exec?which->api.id.t.s.sub.exec!which->api.id.t.s.sub.apilabel?snew->USER_LIVE(id,snew,sub)
+EXIT(id,s,sub)=input.id.t.s.sub.exec?which->if id==1 then USER_LIVE(id,s,sub) else api.id.t.s.sub.exit->USER(id)  
+CREATE(id,s,sub)=input.id.t.s.sub.create?which?sobject->api.id.t.s.sub.create!which!sobject->USER_LIVE(id,s,sub)
+DELETE(id,s,sub)=input.id.t.s.sub.delete?which->api.id.t.s.sub.delete!which->USER_LIVE(id,s,sub)
+SEND(id,s,sub)=input.id.t.s.sub.send?to->api.id.t.s.sub.send!to->USER_LIVE(id,s,sub)  
+RECV(id,s,sub)=input.id.t.s.sub.recv?from->api.id.t.s.sub.recv!from->api.id.t.s.sub.apireturn?policy?snew->USER_LIVE(id,snew,sub)
+WRITE(id,s,sub)=input.id.t.s.sub.write?which->api.id.t.s.sub.write!which->USER_LIVE(id,s,sub)
+READ(id,s,sub)=input.id.t.s.sub.read?which->api.id.t.s.sub.read!which->api.id.t.s.sub.apireturn?policy?snew->USER_LIVE(id,snew,sub)
+CHANGESELFLABEL(id,s,sub)=input.id.t.s.sub.changeselflabel?snew->api.id.t.s.sub.changeselflabel!snew->USER_LIVE(id,s,sub)
+
+CHANGEOBJECTLABEL(id,s,sub)=input.id.t.s.sub.changeobjectlabel?which?snew->api.id.t.s.sub.changeobjectlabel!which!snew->USER_LIVE(id,s,sub)
+
+--aaa
+USER_LIVE(id,s,sub)=EXEC(id,s,sub)
+		      []EXIT(id,s,sub)[]CREATE(id,s,sub)[]DELETE(id,s,sub)
+			--[]READ(id,s,sub)
+			--[]CHANGESELFLABEL(id,s,sub)
+			[]SEND(id,s,sub)[]RECV(id,s,sub)
+			--[]WRITE(id,s,sub)[]CHANGEOBJECTLABEL(id,s,sub)
+
+USER(id)=api.id.t?s?sub.born->USER_LIVE(id,s,sub)
+---用户并发进程--------
+USERS= (|||id:{2..MAX} @ USER(id))|||USER_LIVE(1,{},{d})
+--input,api:PROCESS.COMMAND
+
+-------------------------内核----------------------------------------------------------------------------
+-----------------引用监视器--各个系统调用实现---
+BUFF= |||from:{1..MAX} @ BUFF_1(from)
+BUFF_1(from)=|||to:{1..MAX}@BUFF_2(from,to,0,{})
+BUFF_2(from,to,full,s)=buff.from.to.in?snew->BUFF_2(from,to,1,snew)[]buff.from.to.out->BUFF_2(from,to,0,{})
+			[]buff.from.to.test!full!s->BUFF_2(from,to,full,s)
+
+RM_EXEC(id)=api.id.t?stmpt?subtmpt.exec?which->enterO.which->enterS.id->access_secsvr.id.iexec!which->access_secsvr.id.jexec
+	?policy?snew?who.t?sborn?subborn->	api.id.t.stmpt.subtmpt.apilabel!snew->leaveS.id->leaveO.which->if policy==accept 
+		then api!who.t!sborn!subborn.born->RM_ITEM(id) else RM_ITEM(id)
+RM_SEND(id)=api.id.t?stmpt?subtmpt.send?to->if to==id then RM_ITEM(id) else enterS.id->access_secsvr.id.isend->
+		access_secsvr.id.ireturn?policy?s->buff.id.to.in!s->leaveS.id->RM_ITEM(id)
+RM_RECV(id)=api.id.t?stmpt?subtmpt.recv?from->if from==id then api.id.t.stmpt.subtmpt.apireturn.reject?stmpt->RM_ITEM(id) else sort.sin.id!from->sort.sout?x?y->enterS.x->enterS.y->
+	buff.from.id.test?full?sfrom->access_secsvr.id.irecv!from!full!sfrom->access_secsvr.id.ireturn?policy?snew->
+		if policy==accept then buff.from.id.out->api.id.t.stmpt.subtmpt.apireturn!policy!snew->leaveS.y->leaveS.x->RM_ITEM(id)
+				    else api.id.t.stmpt.subtmpt.apireturn!policy!snew->leaveS.y->leaveS.x->RM_ITEM(id)
+
+
+RM_WRITE(id)=api.id.t?stmpt?subtmpt.write?which->enterO.which->enterS.id->access_secsvr.id.iwrite!which->leaveS.id->leaveO.which->RM_ITEM(id)
+			
+RM_READ(id)=api.id.t?stmpt?subtmpt.read?which->enterO.which->enterS.id->access_secsvr.id.iread!which->access_secsvr.id.ireturn?policy?snew->
+		api.id.t.stmpt.subtmpt.apireturn!policy!snew->leaveS.id->leaveO.which->RM_ITEM(id)
+
+RM_CREATE(id)=api.id.t?stmpt?subtmpt.create?which?sobject->enterO.which->enterS.id->access_secsvr.id.icreate!which!sobject->
+	access_secsvr.id.ireturn?policy?stmpt->leaveS.id->leaveO.which->RM_ITEM(id)
+
+RM_DELETE(id)=api.id.t?stmpt?subtmpt.delete?which->enterO.which->enterS.id->access_secsvr.id.idelete!which->
+		access_secsvr.id.ireturn?policy?stmpt->leaveS.id->leaveO.which->RM_ITEM(id)
+
+RM_EXIT(id)=api.id.t?stmpt?subtmpt.exit->enterS.id->RM_eEXIT(id,MAX)
+RM_eEXIT(from,to)=if to==0 then access_secsvr.from.iexit->access_secsvr.from.ireturn?policy->leaveS.from->RM_ITEM(from)
+			      else buff.from.to.out->RM_eEXIT(from,to-1)
+
+RM_CHANGESELFLABEL(id)=api.id.t?stmpt?subtmpt.changeselflabel?snew->enterS.id->access_secsvr.id.ichangeselflabel!snew->
+		access_secsvr.id.ireturn?policy?sold->leaveS.id->RM_ITEM(id)
+RM_CHANGEOBJECTLABEL(id)=api.id.t?stmpt?subtmpt.changeobjectlabel?which?snew->enterO.which->enterS.id->
+	access_secsvr.id.ichangeobjectlabel!which!snew->access_secsvr.id.ireturn?policy?sold->leaveS.id->leaveO.which->RM_ITEM(id)
+
+--同步进程
+SYN_S_ITEM(id)=enterS.id->leaveS.id->SYN_S_ITEM(id)
+SYN_S=|||id:{1..MAX}@SYN_S_ITEM(id)
+SYN_O_ITEM(oid)=enterO.oid->leaveO.oid->SYN_O_ITEM(oid)
+SYN_O=|||oid:{1..MAXOBJECT}@SYN_O_ITEM(oid)
+SYN=SYN_S|||SYN_O
+--排序进程
+SORT=sort.sin?x?y->if (x>y) then sort.sout.y.x ->SORT else sort.sout.x.y->SORT
+--为了服务质量好,下面应并发执行,但是由于用户进程内部是选择,且RM_(id)的第一个事件均是调用事件!!,实际上这里也是选择进行
+--aaa
+RM_ITEM(id)=RM_EXEC(id)
+	     []RM_EXIT(id)[]RM_CREATE(id)[]RM_DELETE(id)
+		--[]RM_READ(id)
+	     	[]RM_SEND(id)[]RM_RECV(id)
+		--[]RM_CHANGESELFLABEL(id)
+	     --[]RM_WRITE(id)[]RM_CHANGEOBJECTLABEL(id)
+
+RM= (((|||id:{1..MAX}@ RM_ITEM(id)) [|{|sort|}|] SORT)[|{|enterS,leaveS,enterO,leaveO|}|] SYN )[|{|buff|}|]BUFF
+--  api:PROCESS.COMMAND
+-- access_secsvr:WHO.ACCESS_SECSVR
+-- enterS:{1..MAX}  leaveS:{1..MAX} enterO:{1..MAXOBJECT} leaveO:{1..MAXOBJECT}
+-- sort:in/out.{1..MAX}.{1..MAX}
+--buff:{1..MAX}.{1..MAX}.OPERATE
+------------------------安全服务器----------------------------
+--随机初始化客体
+--aaa
+ABILITY_RANDC=randc.req?s->if s=={d} then NonceQ?select:{1..1}->if select==1 then randc.res.{}.{}->ABILITY_RANDC else randc.res.{}.{d}->ABILITY_RANDC 
+				else NonceQ?select:{1..1}->if select==1 then randc.res.{d}.{d}->ABILITY_RANDC else 
+				     if select==2 then randc.res.{d}.{}->ABILITY_RANDC else randc.res.{}.{}->ABILITY_RANDC
+
+--ABILITY_RANDC=randc.req?s->if s=={d} then NonceQ?select:{1..2}->if select==1 then randc.res.{}.{}->ABILITY_RANDC else randc.res.{}.{d}->ABILITY_RANDC 
+--				else NonceQ?select:{1..3}->if select==1 then randc.res.{d}.{d}->ABILITY_RANDC else 
+--				     if select==2 then randc.res.{d}.{}->ABILITY_RANDC else randc.res.{}.{}->ABILITY_RANDC
+
+SECSVR_EXEC(id)=access_secsvr.id.iexec?which->access_lsm.getobject.which.tag?s_object?c_add_object?c_sub_object?exist->
+		access_lsm.getsubject.id.tag?s_subject?c_add_subject?c_sub_subject?exist2->		
+  if exist==1 and s_object<=union(s_subject,c_add_subject) and diff(s_subject,inter(c_add_subject,c_sub_subject))<=union(s_object,c_add_object) 
+   then access_lsm.setsubject.id.tag!union(s_object,s_subject)!c_add_subject!c_sub_subject!1->
+  	enterlsmid->access_lsm.getpid->access_lsm.chooseid?choosepolicy?selectid->leavelsmid->
+	if choosepolicy==1 
+	then access_lsm.setsubject!selectid.tag!union(s_object,diff(s_subject,inter(c_add_subject,c_sub_subject)))!c_add_object!c_sub_object!1->
+      	     access_secsvr.id.jexec!accept!union(s_object,s_subject)!selectid.t!union(s_object,diff(s_subject,inter(c_add_subject,c_sub_subject)))!c_sub_object->SS_ITEM(id)
+    	else access_secsvr.id.jexec!reject!union(s_object,s_subject)!1.t!{}!{}->SS_ITEM(id)
+   else if exist==1 and s_object<=union(s_subject,c_add_subject)  
+	then access_lsm.setsubject.id.tag!union(s_object,s_subject)!c_add_subject!c_sub_subject!1->
+	     access_secsvr.id.jexec!reject!union(s_object,s_subject)!1.t!{}!{}->SS_ITEM(id)
+	else if exist==0  then access_lsm.setsubject.id.tag!union(s_subject,c_add_subject)!c_add_subject!c_sub_subject!1->
+				  access_secsvr.id.jexec!reject!union(s_subject,c_add_subject)!1.t!{}!{}->SS_ITEM(id)
+			    else access_secsvr.id.jexec!reject!s_subject!1.t!{}!{}->SS_ITEM(id)
+SECSVR_SEND(id)=access_secsvr.id.isend->access_lsm.getsubject.id.tag?s_subject?c_add_subject?c_sub_subject?exist2->
+		access_secsvr.id.ireturn!accept!diff(s_subject,inter(c_add_subject,c_sub_subject))->SS_ITEM(id)
+
+SECSVR_RECV(id)=access_secsvr.id.irecv?from?full?sfrom->access_lsm.getsubject.from.tag?stmpt?c_add_tmpt?c_sub_tmpt?exist->
+		access_lsm.getsubject.id.tag?s_subject?c_add_subject?c_sub_subject?exist2->
+  if exist==1 and sfrom<=union(s_subject,c_add_subject) and full==1 
+    then  access_lsm.setsubject.id.tag!union(sfrom,s_subject)!c_add_subject!c_sub_subject!1->access_secsvr.id.ireturn!accept!union(sfrom,s_subject)->SS_ITEM(id)
+    else  if exist==1 and sfrom<=union(s_subject,c_add_subject)
+	 then  access_lsm.setsubject.id.tag!union(sfrom,s_subject)!c_add_subject!c_sub_subject!1->
+		access_secsvr.id.ireturn!reject!union(sfrom,s_subject)->SS_ITEM(id)
+	 else if exist==0  then access_lsm.setsubject.id.tag!union(s_subject,c_add_subject)!c_add_subject!c_sub_subject!1->
+				   access_secsvr.id.ireturn!reject!union(s_subject,c_add_subject)->SS_ITEM(id) 
+			     else access_secsvr.id.ireturn!reject!s_subject->SS_ITEM(id) 
+
+SECSVR_WRITE(id)=access_secsvr.id.iwrite?which->SS_ITEM(id)
+		--access_lsm.getobject.which.tag?s_object?c_add_object?c_sub_object?exist->access_lsm.getsubject.id.tag?s_subject?c_add_subject?c_sub_subject?exist2->
+		--if exist==1 and diff(s_subject,inter(c_add_subject,c_sub_subject))<=s_object  then SS_ITEM(id) else SS_ITEM(id)
+SECSVR_READ(id)=access_secsvr.id.iread?which->access_lsm.getobject.which.tag?s_object?c_add_object?c_sub_object?exist->
+			access_lsm.getsubject.id.tag?s_subject?c_add_subject?c_sub_subject?exist2->
+  if exist==1 and s_object<=union(s_subject,c_add_subject) 
+    then access_lsm.setsubject.id.tag!union(s_object,s_subject)!c_add_subject!c_sub_subject!1->
+  	access_secsvr.id.ireturn!accept!union(s_object,s_subject)->SS_ITEM(id)
+    else if exist==0  then access_lsm.setsubject.id.tag!union(s_subject,c_add_subject)!c_add_subject!c_sub_subject!1->
+			    access_secsvr.id.ireturn!reject!union(s_subject,c_add_subject)->SS_ITEM(id)
+			else access_secsvr.id.ireturn!reject!s_subject->SS_ITEM(id)
+
+SECSVR_CREATE(id)=access_secsvr.id.icreate?which?sobject->
+		access_lsm.getobject.which.tag?s_object?c_add_object?c_sub_object?exist->access_lsm.getsubject.id.tag?s_subject?c_add_subject?c_sub_subject?exist2->
+		if exist==0 and diff(s_subject,inter(c_add_subject,c_sub_subject))<=sobject 
+		then randc.req!sobject->randc.res?c_add_object?c_sub_object->
+		     access_lsm.setobject.which.tag!sobject!c_add_object!c_sub_object!1->
+		     access_secsvr.id.ireturn!accept!sobject->SS_ITEM(id)
+		else access_secsvr.id.ireturn!reject!sobject->SS_ITEM(id)
+
+SECSVR_DELETE(id)=access_secsvr.id.idelete?which->
+		access_lsm.getobject.which.tag?s_object?c_add_object?c_sub_object?exist->access_lsm.getsubject.id.tag?s_subject?c_add_subject?c_sub_subject?exist2->
+		if exist==1 and diff(s_subject,inter(c_add_subject,c_sub_subject))<=s_object 
+		then access_lsm.setobject.which.tag!s_object!c_add_object!c_sub_object!0->
+		     access_secsvr.id.ireturn!accept!s_object->SS_ITEM(id)
+		else access_secsvr.id.ireturn!reject!s_object->SS_ITEM(id)
+
+SECSVR_EXIT(id)=access_secsvr.id.iexit->access_lsm.setsubject.id.tag.{}.{}.{}.0->enterlsmid->
+			access_lsm.deleteid.id->leavelsmid->access_secsvr.id.ireturn.accept.{}->SS_ITEM(id)
+
+SECSVR_CHANGESELFLABEL(id)=access_secsvr.id.ichangeselflabel?snew->access_lsm.getsubject.id.tag?s_subject?c_add_subject?c_sub_subject?exist->
+	if diff(s_subject,snew)<=c_sub_subject and diff(snew,s_subject)<=c_add_subject
+		then access_lsm.setsubject.id.tag!snew!c_add_subject!c_sub_subject!1->
+		     access_secsvr.id.ireturn!accept!snew->SS_ITEM(id)
+		else access_secsvr.id.ireturn!reject!snew->SS_ITEM(id)
+
+SECSVR_CHANGEOBJECTLABEL(id)=access_secsvr.id.ichangeobjectlabel?which?snew->access_lsm.getobject.which.tag?s_object?c_add_object?c_sub_object?exist->
+			access_lsm.getsubject.id.tag?s_subject?c_add_subject?c_sub_subject?exist2->
+	if exist==1 and diff(s_subject,inter(c_add_subject,c_sub_subject))<=s_object and 
+		s_object<=union(s_subject,inter(c_add_subject,c_sub_subject)) and diff(s_subject,inter(c_add_subject,c_sub_subject))<=snew
+		then access_lsm.setobject.which.tag!snew!c_add_object!c_sub_object!1->
+		     access_secsvr.id.ireturn!accept!snew->SS_ITEM(id)
+		else access_secsvr.id.ireturn!reject!snew->SS_ITEM(id)
+--同步进程2
+SYN_ID=enterlsmid->leavelsmid->SYN_ID
+--由于RM是选择,且SPS第一个均是调用事件,想并发,实际上是选择
+--aaa
+SS_ITEM(id)=SECSVR_EXEC(id)
+		[]SECSVR_EXIT(id)[]SECSVR_CREATE(id)[]SECSVR_DELETE(id)
+		--[]SECSVR_READ(id)
+		[]SECSVR_SEND(id)[]SECSVR_RECV(id)
+		--[]SECSVR_CHANGESELFLABEL(id)
+		--[]SECSVR_WRITE(id)[]SECSVR_CHANGEOBJECTLABEL(id)
+
+SECSVR= ((|||id:{1..MAX}@ SS_ITEM(id)) [|{|enterlsmid,leavelsmid|}|] SYN_ID) [|{|randc|}|] ABILITY_RANDC 
+-- access_secsvr:WHO.ACCESS_SECSVR
+--access_lsm:access_LSM
+--enterlsmid,leavelsmid
+--NonceQ:{1..8}
+--randc:CONFIG
+-----------------标记状态管理器----------------
+
+--并发部分六个命令
+LSM_SUBJECT_ITEM_LIVE(id,s,c_add,c_sub,exist)=access_lsm.getsubject.id.tag!s!c_add!c_sub!exist->LSM_SUBJECT_ITEM_LIVE(id,s,c_add,c_sub,exist)
+	 []access_lsm.setsubject.id.tag?s_new?c_add_new?c_sub_new?exist_new->LSM_SUBJECT_ITEM_LIVE(id,s_new,c_add_new,c_sub_new,exist_new)
+--第一个进程
+LSM_SUBJECT=(|||id:{2..MAX}@LSM_SUBJECT_ITEM_LIVE(id,{},{},{},0))|||LSM_SUBJECT_ITEM_LIVE(1,{},{d},{d},1)
+--客体部分
+LSM_OBJECT_ITEM_LIVE(oid,s,c_add,c_sub,exist)=access_lsm.getobject.oid.tag!s!c_add!c_sub!exist->LSM_OBJECT_ITEM_LIVE(oid,s,c_add,c_sub,exist)
+	[]access_lsm.setobject.oid.tag?s_new?c_add_new?c_sub_new?exist_new->LSM_OBJECT_ITEM_LIVE(oid,s_new,c_add_new,c_sub_new,exist_new)
+LSM_OBJECT=|||oid:{1..MAXOBJECT}@LSM_OBJECT_ITEM_LIVE(oid,{},{},{},1)
+--ID管理
+LSM_ID_MANAGE(subjectidset,freeidset)=access_lsm.deleteid?selectid:subjectidset->LSM_ID_MANAGE(diff(subjectidset,{selectid}),union(freeidset,{selectid}))
+[]access_lsm.getpid->if empty(freeidset) then access_lsm.chooseid.0.1->LSM_ID_MANAGE(subjectidset,freeidset)
+	else nonceID?selectid:freeidset->access_lsm.chooseid.1.selectid->LSM_ID_MANAGE(union(subjectidset,{selectid}),diff(freeidset,{selectid}))
+	
+
+LSM=LSM_SUBJECT ||| LSM_OBJECT ||| LSM_ID_MANAGE({1},{2..MAX}) 
+--access_lsm:access_LSM
+-- nonceID:{1..MAX}
+
+--整个系统
+--input,api:PROCESS.COMMAND
+
+--  api:PROCESS.COMMAND
+-- access_secsvr:WHO.ACCESS_SECSVR
+-- enterS:{1..MAX}  leaveS:{1..MAX} enterO:{1..MAXOBJECT} leaveO:{1..MAXOBJECT}
+-- sort:in/out.{1..MAX}.{1..MAX}
+--buff:{1..MAX}.{1..MAX}.OPERATE
+
+-- access_secsvr:WHO.ACCESS_SECSVR
+--access_lsm:access_LSM
+--enterlsmid,leavelsmid
+--NonceQ:{1..8}
+--randc:CONFIG
+
+--access_lsm:access_LSM
+-- nonceID:{1..MAX}
+
+
+KERNEL=(LSM [|{|access_lsm|}|] SECSVR) [|{|access_secsvr|}|] RM
+
+aKERNEL={|access_secsvr,enterS,leaveS,enterO,leaveO,sort,buff,access_lsm,enterlsmid,leavelsmid,NonceQ,randc,nonceID|}
+
+SYSTEM= (USERS [|{|api|}|] KERNEL)\aKERNEL
+
+aHIGH=union({input.id.t.{d}.sub.command|id<-{1..MAX},sub<-C_SUB,command<-COMMAND},
+	     {api.id.t.{d}.sub.command|id<-{1..MAX},sub<-C_SUB,command<-COMMAND})
+aLOW=union({input.id.t.{}.sub.command|id<-{1..MAX},sub<-C_SUB,command<-COMMAND},
+	    {api.id.t.{}.sub.command|id<-{1..MAX},sub<-C_SUB,command<-COMMAND})
+aMID=union({input.id.t.s.{d}.command|id<-{1..MAX},s<-S,command<-COMMAND},
+	    {api.id.t.s.{d}.command|id<-{1..MAX},s<-S,command<-COMMAND})
+--aaa
+SYS1=(SYSTEM [|diff(aHIGH,aMID)|]STOP)\union(aHIGH,aMID)
+SYS2=SYSTEM\union(aHIGH,aMID) 
+
+assert SYS1[T= SYS2 
+assert SYS2[T= SYS1--错 
+
+assert SYS1:[deadlock free[F]]
+assert SYS2:[deadlock free[F]]
+assert KERNEL:[deadlock free[F]]
+
+assert SYSTEM:[deadlock free[F]]
+
+assert USERS:[deadlock free[F]]
+assert RM:[deadlock free[F]]
+assert SECSVR:[deadlock free[F]]
+assert LSM:[deadlock free[F]]
